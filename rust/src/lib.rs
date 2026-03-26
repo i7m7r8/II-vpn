@@ -23,7 +23,7 @@ use tls_parser::{parse_tls_plaintext};
 use tls_parser::types::U24;
 
 // Tor – use the preferred runtime from arti_client
-use arti_client::{TorClient, TorClientConfig}; use arti_client::tor_rtcompat::PreferredRuntime;
+use arti_client::{TorClient, TorClientConfig}; use arti_client::config::TorClientConfigBuilder;
 use arti_client::Error as TorError;
 
 // Serialization
