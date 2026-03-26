@@ -15,15 +15,16 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 use thiserror::Error;
 
-// Use the correct tls-parser modules
+// Correct tls-parser imports
 use tls_parser::handshake::extensions::TlsExtension;
 use tls_parser::handshake::*;
 use tls_parser::record::TLSMessage;
 use tls_parser::{parse_tls_plaintext};
 use tls_parser::types::U24;
 
-// Tor – use the preferred runtime from arti_client
-use arti_client::Error as TorError;
+// Tor – use the config builder to enable SOCKS
+use arti_client::{TorClient, TorClientConfig};
+use arti_client::config::TorClientConfigBuilder;
 
 // Serialization
 use serde_json;
@@ -240,21 +241,22 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
 }
 
 // ============================================================
-//  Tor Integration with PreferredRuntime
+//  Tor Integration
 // ============================================================
 
-static TOR_CLIENT: Lazy<Arc<TokioMutex<Option<TorClient<PreferredRuntime>>>>> =
+static TOR_CLIENT: Lazy<Arc<TokioMutex<Option<TorClient<arti_client::tor_rtcompat::PreferredRuntime>>>>> =
     Lazy::new(|| Arc::new(TokioMutex::new(None)));
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
 
 async fn start_tor_internal() -> Result<()> {
-    let config = TorClientConfig::builder()
+    let builder = TorClientConfig::builder();
+    let config = builder
         .socks_port(TOR_SOCKS_PORT)
         .build()
-        .map_err(|e: arti_client::config::Error| IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
     let client = TorClient::create_bootstrapped(config)
         .await
-        .map_err(|e: TorError| IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
     *TOR_CLIENT.lock().await = Some(client);
     log::info!("Tor started on port {}", TOR_SOCKS_PORT);
     Ok(())
@@ -305,7 +307,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_setSniRulesPath(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
-    mut env: JNIEnv, _class: JClass, packet: jbyteArray,
+    env: JNIEnv, _class: JClass, packet: jbyteArray,
 ) -> jbyteArray {
     let jba = unsafe { JByteArray::from(JObject::from_raw(packet)) };
     let len = match env.get_array_length(&jba) {
@@ -332,7 +334,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(&new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            new_array.as_raw()
+            new_array.into_inner()
         }
         None => packet,
     }
@@ -356,7 +358,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_isTorRunning(
     _env: JNIEnv, _class: JClass,
 ) -> jboolean {
     let running = RUNTIME.block_on(async {
-        let guard: tokio::sync::MutexGuard<'_, Option<TorClient<PreferredRuntime>>> = TOR_CLIENT.lock().await;
+        let guard = TOR_CLIENT.lock().await;
         guard.is_some()
     });
     if running { JNI_TRUE } else { JNI_FALSE }
