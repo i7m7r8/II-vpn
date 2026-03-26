@@ -12,8 +12,8 @@ arti-client = { version = "0.40", default-features = false, features = ["rustls"
 tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
 once_cell = "1.19"
 
-# SNI parsing
-tls-parser = { version = "0.12", features = ["full"] }
+# SNI parsing (use default features)
+tls-parser = "0.12"
 bytes = "1"
 
 # Packet parsing (for VPN)
