@@ -125,7 +125,7 @@ fn parse_tls_sni(data: &[u8]) -> Result<(&[u8], String), ()> {
     if data.len() < 3 || data[0] != 0x00 { return Err(()); }
     let len = u16::from_be_bytes([data[1], data[2]]) as usize;
     if data.len() < 3 + len { return Err(()); }
-    let sni = std::str::from_utf8(&data[3..3+len]).map_err(|_| ())?;
+        let sni = match std::str::from_utf8(&data[3..3+len]) { Ok(s) => s, Err(_) => return Err(()) };
     Ok((&data[3+len..], sni.to_string()))
 }
 
@@ -329,7 +329,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            new_array.into_inner()
+            new_array.into()
         }
         None => packet,
     }
@@ -352,7 +352,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_getSniRulesJson(
 pub extern "system" fn Java_com_iivpn_VpnService_isTorRunning(
     _env: JNIEnv, _class: JClass,
 ) -> jboolean {
-    let running = RUNTIME.block_on(async { TOR_CLIENT.lock().await.is_some() });
+    let running = RUNTIME.block_on(async { let guard = TOR_CLIENT.lock().await; guard.is_some() });
     if running { JNI_TRUE } else { JNI_FALSE }
 }
 
