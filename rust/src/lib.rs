@@ -6,10 +6,12 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
-use tls_parser::extensions::TlsExtension;
+
+// Correct imports for tls-parser
+use tls_parser::handshake::extensions::TlsExtension;
 use tls_parser::handshake::*;
 use tls_parser::record::TLSMessage;
-use tls_parser::TlsParserSettings;
+use tls_parser::{parse_tls_plaintext, TlsParserSettings};
 
 // ------------------------------------------------------------
 // SNI rules management (domain -> replacement)
@@ -17,21 +19,18 @@ use tls_parser::TlsParserSettings;
 type SniRules = HashMap<String, String>;
 static SNI_RULES: Lazy<Arc<Mutex<SniRules>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-// Add or update a rule
 pub fn set_sni_rule(domain: &str, replacement: &str) {
     let mut rules = SNI_RULES.lock().unwrap();
     rules.insert(domain.to_string(), replacement.to_string());
     log::info!("SNI rule added: {} -> {}", domain, replacement);
 }
 
-// Remove a rule
 pub fn remove_sni_rule(domain: &str) {
     let mut rules = SNI_RULES.lock().unwrap();
     rules.remove(domain);
     log::info!("SNI rule removed: {}", domain);
 }
 
-// Get replacement for a domain
 fn get_sni_replacement(domain: &str) -> Option<String> {
     let rules = SNI_RULES.lock().unwrap();
     rules.get(domain).cloned()
@@ -52,11 +51,10 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
                 if handshake.handshake_type == HandshakeType::ClientHello {
                     let (_, client_hello) = parse_tls_handshake_clienthello(handshake.body).ok()?;
 
-                    // Find the original SNI from extensions
+                    // Find original SNI
                     let mut original_sni = None;
                     for ext in client_hello.extensions {
                         if ext.typ == 0x00 {
-                            // Parse SNI extension
                             if let Ok((_, sni)) = parse_tls_sni(ext.data) {
                                 original_sni = Some(sni);
                                 break;
@@ -65,16 +63,8 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
                     }
 
                     let new_sni = if let Some(sni) = original_sni {
-                        // Check if we have a rule for this domain
-                        if let Some(replacement) = get_sni_replacement(&sni) {
-                            log::info!("Replacing SNI {} -> {}", sni, replacement);
-                            replacement
-                        } else {
-                            // No rule, keep original
-                            sni
-                        }
+                        get_sni_replacement(&sni).unwrap_or(sni)
                     } else {
-                        // No SNI in ClientHello – nothing to replace
                         return None;
                     };
 
@@ -98,11 +88,9 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
                         &new_extensions,
                     );
 
-                    // Rebuild the handshake record
                     let record = build_handshake_record(HandshakeType::ClientHello, &new_client_hello);
                     output.extend_from_slice(&record);
                 } else {
-                    // Other handshake messages unchanged
                     let record = build_handshake_record(handshake.handshake_type, handshake.body);
                     output.extend_from_slice(&record);
                 }
@@ -129,29 +117,22 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
     Some(output.to_vec())
 }
 
-// Helper to parse SNI from extension data
 fn parse_tls_sni(data: &[u8]) -> Result<(&[u8], String), ()> {
-    // Simple parser: first byte is name type (0 = hostname), then 2-byte length, then the name
-    if data.len() < 3 {
-        return Err(());
-    }
-    if data[0] != 0x00 {
+    if data.len() < 3 || data[0] != 0x00 {
         return Err(());
     }
     let len = u16::from_be_bytes([data[1], data[2]]) as usize;
     if data.len() < 3 + len {
         return Err(());
     }
-    match std::str::from_utf8(&data[3..3+len]) {
-        Ok(s) => Ok((&data[3+len..], s.to_string())),
-        Err(_) => Err(()),
-    }
+    let sni = std::str::from_utf8(&data[3..3 + len]).map_err(|_| ())?;
+    Ok((&data[3 + len..], sni.to_string()))
 }
 
 fn build_sni_extension(sni: &str) -> TlsExtension {
     let server_name = sni.as_bytes();
     let mut ext_data = Vec::new();
-    ext_data.push(0x00); // name type: hostname
+    ext_data.push(0x00);
     ext_data.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
     ext_data.extend_from_slice(server_name);
     TlsExtension {
@@ -194,7 +175,7 @@ fn rebuild_client_hello(
 
 fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
     let mut record = Vec::new();
-    record.push(0x16); // handshake record type
+    record.push(0x16);
     record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
     record.push(msg_type as u8);
     record.extend_from_slice(&(body.len() as u24).to_be_bytes());
@@ -203,14 +184,15 @@ fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
 }
 
 // ------------------------------------------------------------
-// Tor integration with rustls (no OpenSSL)
+// Tor integration with rustls
 // ------------------------------------------------------------
 use arti_client::{TorClient, TorClientConfig};
+
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create runtime"));
-static TOR_CLIENT: Lazy<Arc<tokio::sync::Mutex<Option<TorClient>>>> =
+static TOR_CLIENT: Lazy<Arc<tokio::sync::Mutex<Option<TorClient<tokio::runtime::Runtime>>>>> =
     Lazy::new(|| Arc::new(tokio::sync::Mutex::new(None)));
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_startTor(
     _env: JNIEnv,
     _class: JClass,
@@ -239,32 +221,32 @@ pub extern "system" fn Java_com_iivpn_VpnService_startTor(
 // ------------------------------------------------------------
 // JNI functions for SNI rules
 // ------------------------------------------------------------
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_setSniRule(
     env: JNIEnv,
     _class: JClass,
     domain: JString,
     replacement: JString,
 ) {
-    let domain_str: String = env.get_string(domain).unwrap().into();
-    let repl_str: String = env.get_string(replacement).unwrap().into();
+    let domain_str: String = env.get_string(&domain).unwrap().into();
+    let repl_str: String = env.get_string(&replacement).unwrap().into();
     set_sni_rule(&domain_str, &repl_str);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_removeSniRule(
     env: JNIEnv,
     _class: JClass,
     domain: JString,
 ) {
-    let domain_str: String = env.get_string(domain).unwrap().into();
+    let domain_str: String = env.get_string(&domain).unwrap().into();
     remove_sni_rule(&domain_str);
 }
 
 // ------------------------------------------------------------
 // VPN placeholder (will call modify_sni on packets)
 // ------------------------------------------------------------
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
     _env: JNIEnv,
     _class: JClass,
@@ -275,19 +257,23 @@ pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
 // ------------------------------------------------------------
 // JNI for SNI modification (for testing)
 // ------------------------------------------------------------
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     env: JNIEnv,
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
-    let len = env.get_array_length(packet).unwrap() as usize;
+    let len = env.get_array_length(&packet).unwrap() as usize;
     let mut data = vec![0u8; len];
-    env.get_byte_array_region(packet, 0, &mut data).unwrap();
+    // Convert to i8 slice for JNI
+    let data_i8: &mut [i8] = unsafe {
+        std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i8, data.len())
+    };
+    env.get_byte_array_region(&packet, 0, data_i8).unwrap();
 
     let modified = modify_sni(&data);
     match modified {
-        Some(new_data) => env.byte_array_from_slice(&new_data).unwrap().into(),
+        Some(new_data) => env.byte_array_from_slice(&new_data).unwrap().into_inner(),
         None => packet,
     }
 }
@@ -295,7 +281,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
 // ------------------------------------------------------------
 // Logging
 // ------------------------------------------------------------
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_initLogging(
     _env: JNIEnv,
     _class: JClass,

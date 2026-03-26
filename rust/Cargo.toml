@@ -7,13 +7,13 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Tor with rustls (no openssl)
-arti-client = { version = "0.40", default-features = false, features = ["rustls", "tokio", "pt-client"] }
-tokio = { version = "1", features = ["rt", "net", "sync"] }
+# Tor with rustls and SOCKS support
+arti-client = { version = "0.40", default-features = false, features = ["rustls", "tokio", "pt-client", "socks"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time"] }
 once_cell = "1.19"
 
-# SNI parsing
-tls-parser = "0.12"
+# SNI parsing (enable all features to get full module exports)
+tls-parser = { version = "0.12", features = ["full"] }
 bytes = "1"
 
 # Packet parsing (for VPN)
