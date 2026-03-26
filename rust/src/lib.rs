@@ -334,7 +334,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            new_array.into_inner()
+            new_array.as_raw()
         }
         None => packet,
     }
