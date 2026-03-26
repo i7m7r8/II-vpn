@@ -52,7 +52,7 @@ pub async fn start(tun_fd: i32) -> crate::error::Result<()> {
                                 }
 
                                 // Rebuild the IP packet with modified payload
-                                let final_payload = modified_payload.as_deref().unwrap_or(tcp_payload);
+                                let _final_payload = modified_payload.as_deref().unwrap_or(tcp_payload);
 
                                 // We need to rebuild the whole packet. For simplicity, we'll just echo the original.
                                 // This is a placeholder – replace with actual forwarding later.

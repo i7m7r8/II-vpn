@@ -1,4 +1,5 @@
-use arti_client::{TorClient, TorClientConfig, PreferredRuntime};
+use arti_client::{TorClient, TorClientConfig};
+use arti_client::tor_rtcompat::PreferredRuntime;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -21,7 +22,8 @@ pub async fn start() -> Result<()> {
 }
 
 pub async fn is_running() -> bool {
-    TOR_CLIENT.lock().await.is_some()
+    let guard: tokio::sync::MutexGuard<'_, Option<TorClient<PreferredRuntime>>> = TOR_CLIENT.lock().await;
+    guard.is_some()
 }
 
 pub fn start_sync() -> i32 {
