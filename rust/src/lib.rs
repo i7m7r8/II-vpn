@@ -16,15 +16,14 @@ use tokio::sync::Mutex as TokioMutex;
 use thiserror::Error;
 
 // Use the correct tls-parser modules
-use tls_parser::handshake::extensions::TlsExtension;
+use tls_parser::extensions::TlsExtension;
 use tls_parser::handshake::*;
 use tls_parser::record::TLSMessage;
 use tls_parser::{parse_tls_plaintext};
 use tls_parser::types::U24;
 
 // Tor – use the preferred runtime from arti_client
-use arti_client::{TorClient, TorClientConfig, PreferredRuntime};
-use arti_client::config::TorClientConfigBuilder;
+use arti_client::{TorClient, TorClientConfig}; use arti_client::tor_rtcompat::PreferredRuntime;
 use arti_client::Error as TorError;
 
 // Serialization
@@ -331,7 +330,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             let new_data_i8: &[i8] = unsafe {
                 std::slice::from_raw_parts(new_data.as_ptr() as *const i8, new_data.len())
             };
-            if env.set_byte_array_region(new_array, 0, new_data_i8).is_err() {
+            if env.set_byte_array_region(&new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
             new_array.as_raw()
