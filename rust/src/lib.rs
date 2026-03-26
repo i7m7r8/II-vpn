@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JString, JByteArray};
 use jni::sys::{jbyteArray, jint};
 use jni::JNIEnv;
 use once_cell::sync::Lazy;
@@ -12,6 +12,7 @@ use tls_parser::handshake::extensions::TlsExtension;
 use tls_parser::handshake::*;
 use tls_parser::record::TLSMessage;
 use tls_parser::{parse_tls_plaintext, TlsParserSettings};
+use tls_parser::types::U24;
 
 // ------------------------------------------------------------
 // SNI rules management (domain -> replacement)
@@ -255,7 +256,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
 }
 
 // ------------------------------------------------------------
-// JNI for SNI modification (for testing)
+// JNI for SNI modification (for testing) – safe conversion using JByteArray
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
@@ -263,17 +264,22 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
-    let len = env.get_array_length(&packet).unwrap() as usize;
-    let mut data = vec![0u8; len];
-    // Convert to i8 slice for JNI
-    let data_i8: &mut [i8] = unsafe {
-        std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i8, data.len())
+    // Convert jbyteArray to safe JByteArray wrapper
+    let jbyte_array = JByteArray::from(packet);
+    
+    // Read the packet data into a Vec<u8>
+    let data = match env.convert_byte_array(&jbyte_array) {
+        Ok(v) => v,
+        Err(_) => return packet, // return original on error
     };
-    env.get_byte_array_region(&packet, 0, data_i8).unwrap();
 
     let modified = modify_sni(&data);
     match modified {
-        Some(new_data) => env.byte_array_from_slice(&new_data).unwrap().into(),
+        Some(new_data) => {
+            // Create a new Java byte array and copy the data
+            let new_jbyte_array = env.byte_array_from_slice(&new_data).unwrap();
+            new_jbyte_array.into()
+        }
         None => packet,
     }
 }
