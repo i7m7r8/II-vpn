@@ -161,11 +161,9 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
 
     // Convert back to Java byte array
     match modified {
-    Some(data) => {
+    Some(data) => env.byte_array_from_slice(Some(data) => {data).unwrap().into(),
         let len = data.len() as jint;
         let arr = env.new_byte_array(len).unwrap();
-        env.set_byte_array_region(arr, 0, &data).unwrap();
-        arr.into_inner()
     },
         None => packet, // return original if modification fails
     }
