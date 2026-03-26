@@ -7,9 +7,9 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-# Tor with rustls (no openssl) and pt-client (SOCKS)
-arti-client = { version = "0.40", features = ["pt-client", "tokio", "rustls"] }
-tokio = { version = "1", features = ["full"] }
+# Tor with rustls (no openssl)
+arti-client = { version = "0.40", default-features = false, features = ["rustls", "tokio", "pt-client"] }
+tokio = { version = "1", features = ["rt", "net", "sync"] }
 once_cell = "1.19"
 
 # SNI parsing

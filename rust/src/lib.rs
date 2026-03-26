@@ -203,7 +203,7 @@ fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
 }
 
 // ------------------------------------------------------------
-// Tor integration with rustls
+// Tor integration with rustls (no OpenSSL)
 // ------------------------------------------------------------
 use arti_client::{TorClient, TorClientConfig};
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create runtime"));
