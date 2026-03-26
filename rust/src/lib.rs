@@ -2,26 +2,35 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jbyteArray, jint};
 use jni::JNIEnv;
 use std::sync::Arc;
-use std::thread;
 use tokio::runtime::Runtime;
 use once_cell::sync::Lazy;
 use arti_client::{TorClient, TorClientConfig};
 use std::net::SocketAddr;
 
-// SNI modification function (reuse from previous)
+// ------------------------------------------------------------
+// SNI modification (placeholder – you can reuse your earlier code)
+// ------------------------------------------------------------
 pub fn modify_sni(packet: &[u8], new_sni: &str) -> Option<Vec<u8>> {
-    // (Same implementation as before – omitted for brevity)
-    // You can copy the earlier modify_sni code here.
-    // For now, placeholder:
+    // TODO: Implement TLS ClientHello parsing and SNI replacement.
+    // For now, return None (no modification).
     None
 }
 
-// Global Tokio runtime
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create runtime"));
+// ------------------------------------------------------------
+// Tokio runtime for async Tor operations
+// ------------------------------------------------------------
+static RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    Runtime::new().expect("Failed to create Tokio runtime")
+});
 
-// Global Tor client (once started)
-static TOR_CLIENT: Lazy<Arc<Option<TorClient>>> = Lazy::new(|| Arc::new(None));
+// Global Tor client (initially None)
+static TOR_CLIENT: Lazy<Arc<tokio::sync::Mutex<Option<TorClient>>>> = Lazy::new(|| {
+    Arc::new(tokio::sync::Mutex::new(None))
+});
 
+// ------------------------------------------------------------
+// JNI function to start Tor
+// ------------------------------------------------------------
 #[no_mangle]
 pub extern "system" fn Java_com_iivpn_VpnService_startTor(
     env: JNIEnv,
@@ -31,9 +40,8 @@ pub extern "system" fn Java_com_iivpn_VpnService_startTor(
         let config = TorClientConfig::default();
         match TorClient::create_bootstrapped(config).await {
             Ok(client) => {
-                // Store globally
-                // In a real app, use a mutex or a global static Mutex.
-                // For simplicity, we'll just log success.
+                let mut guard = TOR_CLIENT.lock().await;
+                *guard = Some(client);
                 log::info!("Tor started successfully");
                 0 // success
             }
@@ -46,18 +54,21 @@ pub extern "system" fn Java_com_iivpn_VpnService_startTor(
     result
 }
 
-// Placeholder for VPN start – will be implemented in a later step
+// ------------------------------------------------------------
+// JNI function to start VPN (placeholder)
+// ------------------------------------------------------------
 #[no_mangle]
 pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
-    env: JNIEnv,
+    _env: JNIEnv,
     _class: JClass,
 ) {
-    // Start VPN thread that reads from tun and forwards through Tor
-    // For now, just log.
-    log::info!("VPN started (placeholder)");
+    log::info!("VPN start called – implementation pending");
+    // TODO: Read from tun, parse packets, forward through Tor SOCKS5 proxy.
 }
 
-// JNI function for SNI modification (already defined, but ensure it's present)
+// ------------------------------------------------------------
+// JNI function to modify SNI (called from Kotlin)
+// ------------------------------------------------------------
 #[no_mangle]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     env: JNIEnv,
@@ -65,7 +76,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     packet: jbyteArray,
     new_sni: JString,
 ) -> jbyteArray {
-    // Convert packet to Vec<u8>
+    // Convert Java byte array to Vec<u8>
     let len = env.get_array_length(packet).unwrap() as usize;
     let mut data = vec![0u8; len];
     env.get_byte_array_region(packet, 0, &mut data).unwrap();
@@ -75,14 +86,16 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     let modified = modify_sni(&data, &sni_str);
     match modified {
         Some(new_data) => env.byte_array_from_slice(&new_data).unwrap().into(),
-        None => packet, // return original
+        None => packet, // return original if no modification
     }
 }
 
-// Optional: init logging from Android
+// ------------------------------------------------------------
+// JNI function to initialise logging (optional)
+// ------------------------------------------------------------
 #[no_mangle]
 pub extern "system" fn Java_com_iivpn_VpnService_initLogging(
-    env: JNIEnv,
+    _env: JNIEnv,
     _class: JClass,
 ) {
     env_logger::init();
