@@ -3,6 +3,7 @@ use jni::objects::{JClass, JString};
 use jni::sys::{jbyteArray, jint};
 use jni::JNIEnv;
 use tls_parser::handshake::*;
+use tls_parser::types::U24;
 use tls_parser::record::TLSMessage;
 use tls_parser::{parse_tls_plaintext, TlsParserSettings};
 
@@ -153,14 +154,14 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     env.get_byte_array_region(packet, 0, &mut packet_buf).unwrap();
 
     // Convert Java string to Rust string
-    let new_sni_str: String = env.get_string(new_sni).unwrap().into();
+    let new_sni_str: String = env.get_string(&new_sni).unwrap().into();
 
     // Call the modifier
     let modified = modify_sni(&packet_buf, &new_sni_str);
 
     // Convert back to Java byte array
     match modified {
-        Some(data) => env.byte_array_from_slice(&data).unwrap(),
+        Some(data) => env.byte_array_from_slice(&data).unwrap().into_inner(),
         None => packet, // return original if modification fails
     }
 }
