@@ -36,7 +36,7 @@ pub async fn start(tun_fd: i32) -> crate::error::Result<()> {
 
                         match TcpHeader::from_slice(payload) {
                             Ok((tcp_header, tcp_payload)) => {
-                                let dst_port = tcp_header.destination;
+                                let dst_port = tcp_header.destination_port;
 
                                 // Modify TLS packets if SNI rule exists
                                 let mut modified_payload = None;

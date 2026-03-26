@@ -1,25 +1,22 @@
-use arti_client::{TorClient, TorClientConfig};
+use arti_client::{TorClient, TorClientConfig, PreferredRuntime};
+use once_cell::sync::Lazy;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
-use crate::error::Result;
+use crate::error::{Result, IIVpnError};
 
 static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
-static TOR_CLIENT: Lazy<Arc<Mutex<Option<TorClient<arti_client::tor_rtcompat::PreferredRuntime>>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+static TOR_CLIENT: Lazy<Arc<Mutex<Option<TorClient<PreferredRuntime>>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
 
 pub async fn start() -> Result<()> {
     let config = TorClientConfig::builder()
-        .socks_port(9150)
         .build()
-        .map_err(|e| crate::error::IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
     let client = TorClient::create_bootstrapped(config)
         .await
-        .map_err(|e| crate::error::IIVpnError::Tor(e.to_string()))?;
-    let mut guard = TOR_CLIENT.lock().await;
-    *guard = Some(client);
-    log::info!("Tor started on port 9150");
+        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+    *TOR_CLIENT.lock().await = Some(client);
+    log::info!("Tor started (SOCKS5 on port 9150)");
     Ok(())
 }
 
