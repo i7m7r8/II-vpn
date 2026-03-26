@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use jni::sys::{jbyteArray, jint, jsize};
 use jni::JNIEnv;
-use jni::objects::{JClass, JString};
+use jni::objects::{JClass, JString, JObject, JByteArray};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -44,73 +44,72 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
     let (rem, tls_plaintext) = parse_tls_plaintext(packet).ok()?;
     let mut output = BytesMut::new();
 
-    for record in tls_plaintext.records {
-        match record {
-            TLSMessage::Handshake(handshake) => {
-                if handshake.handshake_type == HandshakeType::ClientHello {
-                    let (_, client_hello) = parse_tls_handshake_clienthello(handshake.body).ok()?;
+    // tls_plaintext.msg is a single TLSMessage
+    match tls_plaintext.msg {
+        TLSMessage::Handshake(handshake) => {
+            if handshake.handshake_type == HandshakeType::ClientHello {
+                let (_, client_hello) = parse_tls_handshake_clienthello(handshake.body).ok()?;
 
-                    // Find original SNI
-                    let mut original_sni = None;
-                    for ext in client_hello.extensions {
-                        if ext.typ == 0x00 {
-                            if let Ok((_, sni)) = parse_tls_sni(ext.data) {
-                                original_sni = Some(sni);
-                                break;
-                            }
+                // Find original SNI
+                let mut original_sni = None;
+                for ext in client_hello.extensions {
+                    if ext.typ == 0x00 {
+                        if let Ok((_, sni)) = parse_tls_sni(ext.data) {
+                            original_sni = Some(sni);
+                            break;
                         }
                     }
-
-                    let new_sni = if let Some(sni) = original_sni {
-                        get_sni_replacement(&sni).unwrap_or(sni)
-                    } else {
-                        return None;
-                    };
-
-                    // Build new extensions, replacing SNI
-                    let mut new_extensions = Vec::new();
-                    for ext in client_hello.extensions {
-                        if ext.typ == 0x00 {
-                            new_extensions.push(build_sni_extension(&new_sni));
-                        } else {
-                            new_extensions.push(ext);
-                        }
-                    }
-
-                    // Rebuild ClientHello
-                    let new_client_hello = rebuild_client_hello(
-                        client_hello.client_version,
-                        client_hello.random,
-                        client_hello.session_id,
-                        client_hello.cipher_suites,
-                        client_hello.compression_methods,
-                        &new_extensions,
-                    );
-
-                    let record = build_handshake_record(HandshakeType::ClientHello, &new_client_hello);
-                    output.extend_from_slice(&record);
-                } else {
-                    let record = build_handshake_record(handshake.handshake_type, handshake.body);
-                    output.extend_from_slice(&record);
                 }
+
+                let new_sni = if let Some(sni) = original_sni {
+                    get_sni_replacement(&sni).unwrap_or(sni)
+                } else {
+                    return None;
+                };
+
+                // Build new extensions, replacing SNI
+                let mut new_extensions = Vec::new();
+                for ext in client_hello.extensions {
+                    if ext.typ == 0x00 {
+                        new_extensions.push(build_sni_extension(&new_sni));
+                    } else {
+                        new_extensions.push(ext);
+                    }
+                }
+
+                // Rebuild ClientHello
+                let new_client_hello = rebuild_client_hello(
+                    client_hello.client_version,
+                    client_hello.random,
+                    client_hello.session_id,
+                    client_hello.cipher_suites,
+                    client_hello.compression_methods,
+                    &new_extensions,
+                );
+
+                let record = build_handshake_record(HandshakeType::ClientHello, &new_client_hello);
+                output.extend_from_slice(&record);
+            } else {
+                let record = build_handshake_record(handshake.handshake_type, handshake.body);
+                output.extend_from_slice(&record);
             }
-            TLSMessage::ChangeCipherSpec(body) => {
-                output.extend_from_slice(&[0x14]);
-                output.extend_from_slice(&(body.len() as u16).to_be_bytes());
-                output.extend_from_slice(body);
-            }
-            TLSMessage::Alert(body) => {
-                output.extend_from_slice(&[0x15]);
-                output.extend_from_slice(&(body.len() as u16).to_be_bytes());
-                output.extend_from_slice(body);
-            }
-            TLSMessage::ApplicationData(body) => {
-                output.extend_from_slice(&[0x17]);
-                output.extend_from_slice(&(body.len() as u16).to_be_bytes());
-                output.extend_from_slice(body);
-            }
-            _ => {}
         }
+        TLSMessage::ChangeCipherSpec(body) => {
+            output.extend_from_slice(&[0x14]);
+            output.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            output.extend_from_slice(body);
+        }
+        TLSMessage::Alert(body) => {
+            output.extend_from_slice(&[0x15]);
+            output.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            output.extend_from_slice(body);
+        }
+        TLSMessage::ApplicationData(body) => {
+            output.extend_from_slice(&[0x17]);
+            output.extend_from_slice(&(body.len() as u16).to_be_bytes());
+            output.extend_from_slice(body);
+        }
+        _ => {}
     }
 
     Some(output.to_vec())
@@ -253,7 +252,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
 }
 
 // ------------------------------------------------------------
-// JNI for SNI modification (safe direct JNI calls)
+// JNI for SNI modification (direct JNI calls, using JObject wrappers)
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
@@ -261,19 +260,22 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
+    // Wrap the raw pointer in JObject and JByteArray for safe operations
+    let obj = JObject::from(packet);
+    let jba = JByteArray::from(obj);
+
     // Get length
-    let len = match env.get_array_length(packet) {
+    let len = match env.get_array_length(&jba) {
         Ok(l) => l as usize,
         Err(_) => return packet,
     };
 
     // Read packet data into Vec<u8>
     let mut data = vec![0u8; len];
-    // Convert to i8 slice for JNI
     let data_i8: &mut [i8] = unsafe {
         std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i8, len)
     };
-    if env.get_byte_array_region(packet, 0, data_i8).is_err() {
+    if env.get_byte_array_region(&jba, 0, data_i8).is_err() {
         return packet;
     }
 
@@ -291,8 +293,8 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            // Return the raw pointer
-            new_array.into_inner()
+            // Convert JByteArray back to raw pointer
+            new_array.as_obj().into_inner()
         }
         None => packet,
     }
