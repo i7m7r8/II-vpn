@@ -167,4 +167,3 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     },
         None => packet, // return original if modification fails
     }
-}

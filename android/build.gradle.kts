@@ -1,4 +1,5 @@
 plugins {
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.0" apply false
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
@@ -21,6 +22,10 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
+    buildFeatures {
+        compose = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
