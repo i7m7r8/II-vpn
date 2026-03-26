@@ -1,50 +1,247 @@
+//! II VPN – Rust core with SNI spoofing, Tor integration, and VPN tunnel.
+//! This library is compiled into a shared object (.so) for Android.
+//! All JNI functions are exposed for Kotlin/Java.
+
+// ============================================================
+//  Imports & Modules
+// ============================================================
+
 use bytes::BytesMut;
-use jni::sys::{jbyteArray, jint, jsize};
-use jni::JNIEnv;
 use jni::objects::{JClass, JString, JObject, JByteArray};
+use jni::sys::{jbyteArray, jint, jboolean, JNI_TRUE, JNI_FALSE};
+use jni::JNIEnv;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Write, Read};
+use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::runtime::Runtime;
+use tokio::sync::Mutex as TokioMutex;
+use tokio::net::TcpStream;
+use futures::TryFutureExt;
+use thiserror::Error;
 
-// Correct imports for tls-parser
+// SNI parsing
 use tls_parser::handshake::extensions::TlsExtension;
 use tls_parser::handshake::*;
 use tls_parser::record::TLSMessage;
 use tls_parser::{parse_tls_plaintext, TlsParserSettings};
 use tls_parser::types::U24;
 
-// ------------------------------------------------------------
-// SNI rules management (domain -> replacement)
-// ------------------------------------------------------------
-type SniRules = HashMap<String, String>;
-static SNI_RULES: Lazy<Arc<Mutex<SniRules>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+// Tor
+use arti_client::{TorClient, TorClientConfig, TorAddr};
+use arti_client::config::BoolOrAuto;
 
-pub fn set_sni_rule(domain: &str, replacement: &str) {
-    let mut rules = SNI_RULES.lock().unwrap();
+// For VPN packet parsing
+use pnet::packet::ip::IpNextHeaderProtocol;
+use pnet::packet::ipv4::Ipv4Packet;
+use pnet::packet::tcp::TcpPacket;
+use pnet::packet::Packet;
+
+// For serialising SNI rules
+use serde::{Serialize, Deserialize};
+
+// ============================================================
+//  Constants & Configuration
+// ============================================================
+
+/// Default SOCKS5 port for Tor (as defined by Arti)
+const TOR_SOCKS_PORT: u16 = 9150;
+
+/// VPN tunnel IP address
+const VPN_TUN_ADDR: &str = "10.0.0.2";
+const VPN_TUN_MASK: i32 = 32;
+
+/// Maximum packet size (MTU)
+const MTU: usize = 1500;
+
+// ============================================================
+//  Error Types
+// ============================================================
+
+#[derive(Error, Debug)]
+pub enum IIVpnError {
+    #[error("JNI error: {0}")]
+    Jni(String),
+    #[error("Tor error: {0}")]
+    Tor(String),
+    #[error("SNI parsing error: {0}")]
+    Sni(String),
+    #[error("VPN error: {0}")]
+    Vpn(String),
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Serde error: {0}")]
+    Serde(#[from] serde_json::Error),
+}
+
+type Result<T> = std::result::Result<T, IIVpnError>;
+
+// ============================================================
+//  SNI Rules Management
+// ============================================================
+
+/// In-memory SNI rule map: domain -> replacement
+static SNI_RULES: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+
+/// Persistent storage path (Android data directory, set via JNI)
+static SNI_RULES_PATH: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
+
+/// Set the path for persistent storage (called from Kotlin)
+pub fn set_sni_rules_path(path: PathBuf) {
+    let mut guard = SNI_RULES_PATH.lock().unwrap();
+    *guard = Some(path);
+    // Try to load existing rules
+    if let Some(p) = guard.as_ref() {
+        load_rules_from_file(p).ok();
+    }
+}
+
+/// Load rules from JSON file
+fn load_rules_from_file(path: &PathBuf) -> Result<()> {
+    let content = fs::read_to_string(path)?;
+    let rules: HashMap<String, String> = serde_json::from_str(&content)?;
+    let mut guard = SNI_RULES.write().unwrap();
+    *guard = rules;
+    log::info!("Loaded {} SNI rules from {}", guard.len(), path.display());
+    Ok(())
+}
+
+/// Save rules to JSON file
+fn save_rules_to_file() -> Result<()> {
+    let guard = SNI_RULES_PATH.lock().unwrap();
+    if let Some(path) = guard.as_ref() {
+        let rules = SNI_RULES.read().unwrap();
+        let json = serde_json::to_string_pretty(&*rules)?;
+        fs::write(path, json)?;
+        log::info!("Saved {} SNI rules to {}", rules.len(), path.display());
+    }
+    Ok(())
+}
+
+/// Add or update an SNI rule
+pub fn set_sni_rule(domain: &str, replacement: &str) -> Result<()> {
+    let mut rules = SNI_RULES.write().unwrap();
     rules.insert(domain.to_string(), replacement.to_string());
     log::info!("SNI rule added: {} -> {}", domain, replacement);
+    drop(rules);
+    save_rules_to_file()?;
+    Ok(())
 }
 
-pub fn remove_sni_rule(domain: &str) {
-    let mut rules = SNI_RULES.lock().unwrap();
-    rules.remove(domain);
-    log::info!("SNI rule removed: {}", domain);
+/// Remove an SNI rule
+pub fn remove_sni_rule(domain: &str) -> Result<()> {
+    let mut rules = SNI_RULES.write().unwrap();
+    if rules.remove(domain).is_some() {
+        log::info!("SNI rule removed: {}", domain);
+        drop(rules);
+        save_rules_to_file()?;
+    }
+    Ok(())
 }
 
+/// Get replacement for a domain
 fn get_sni_replacement(domain: &str) -> Option<String> {
-    let rules = SNI_RULES.lock().unwrap();
+    let rules = SNI_RULES.read().unwrap();
     rules.get(domain).cloned()
 }
 
-// ------------------------------------------------------------
-// SNI modification: parse ClientHello, extract SNI, replace if rule exists
-// ------------------------------------------------------------
+// ============================================================
+//  SNI Modification Core
+// ============================================================
+
+/// Extract SNI from TLS ClientHello
+fn extract_sni_from_client_hello(handshake_body: &[u8]) -> Option<String> {
+    let (_, client_hello) = parse_tls_handshake_clienthello(handshake_body).ok()?;
+    for ext in client_hello.extensions {
+        if ext.typ == 0x00 {
+            if let Ok((_, sni)) = parse_tls_sni(ext.data) {
+                return Some(sni);
+            }
+        }
+    }
+    None
+}
+
+/// Parse SNI from extension data (simple)
+fn parse_tls_sni(data: &[u8]) -> Result<(&[u8], String), ()> {
+    if data.len() < 3 || data[0] != 0x00 {
+        return Err(());
+    }
+    let len = u16::from_be_bytes([data[1], data[2]]) as usize;
+    if data.len() < 3 + len {
+        return Err(());
+    }
+    let sni = std::str::from_utf8(&data[3..3 + len]).map_err(|_| ())?;
+    Ok((&data[3 + len..], sni.to_string()))
+}
+
+/// Build SNI extension bytes
+fn build_sni_extension(sni: &str) -> TlsExtension {
+    let server_name = sni.as_bytes();
+    let mut ext_data = Vec::new();
+    ext_data.push(0x00);
+    ext_data.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+    ext_data.extend_from_slice(server_name);
+    TlsExtension {
+        typ: 0x00,
+        data: ext_data,
+    }
+}
+
+/// Rebuild ClientHello after modifying SNI
+fn rebuild_client_hello(
+    version: u16,
+    random: &[u8; 32],
+    session_id: &[u8],
+    cipher_suites: &[u16],
+    compression_methods: &[u8],
+    extensions: &[TlsExtension],
+) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&version.to_be_bytes());
+    body.extend_from_slice(random);
+    body.push(session_id.len() as u8);
+    body.extend_from_slice(session_id);
+    body.extend_from_slice(&(cipher_suites.len() as u16 * 2).to_be_bytes());
+    for cs in cipher_suites {
+        body.extend_from_slice(&cs.to_be_bytes());
+    }
+    body.push(compression_methods.len() as u8);
+    body.extend_from_slice(compression_methods);
+
+    let mut ext_bytes = Vec::new();
+    for ext in extensions {
+        ext_bytes.extend_from_slice(&ext.typ.to_be_bytes());
+        ext_bytes.extend_from_slice(&(ext.data.len() as u16).to_be_bytes());
+        ext_bytes.extend_from_slice(&ext.data);
+    }
+    body.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
+    body.extend_from_slice(&ext_bytes);
+
+    body
+}
+
+/// Build a TLS handshake record (plaintext)
+fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.push(0x16); // handshake record type
+    record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+    record.push(msg_type as u8);
+    record.extend_from_slice(&(body.len() as u24).to_be_bytes());
+    record.extend_from_slice(body);
+    record
+}
+
+/// Modify SNI in a raw TLS packet according to rules.
+/// Returns the modified packet, or None if no modification needed.
 pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
     let (rem, tls_plaintext) = parse_tls_plaintext(packet).ok()?;
     let mut output = BytesMut::new();
 
-    // tls_plaintext.msg is a single TLSMessage
     match tls_plaintext.msg {
         TLSMessage::Handshake(handshake) => {
             if handshake.handshake_type == HandshakeType::ClientHello {
@@ -64,10 +261,11 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
                 let new_sni = if let Some(sni) = original_sni {
                     get_sni_replacement(&sni).unwrap_or(sni)
                 } else {
+                    // No SNI, nothing to replace
                     return None;
                 };
 
-                // Build new extensions, replacing SNI
+                // Build new extensions with replaced SNI
                 let mut new_extensions = Vec::new();
                 for ext in client_hello.extensions {
                     if ext.typ == 0x00 {
@@ -77,7 +275,6 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
                     }
                 }
 
-                // Rebuild ClientHello
                 let new_client_hello = rebuild_client_hello(
                     client_hello.client_version,
                     client_hello.random,
@@ -115,109 +312,132 @@ pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
     Some(output.to_vec())
 }
 
-fn parse_tls_sni(data: &[u8]) -> Result<(&[u8], String), ()> {
-    if data.len() < 3 || data[0] != 0x00 {
-        return Err(());
-    }
-    let len = u16::from_be_bytes([data[1], data[2]]) as usize;
-    if data.len() < 3 + len {
-        return Err(());
-    }
-    let sni = std::str::from_utf8(&data[3..3 + len]).map_err(|_| ())?;
-    Ok((&data[3 + len..], sni.to_string()))
+// ============================================================
+//  Tor Integration
+// ============================================================
+
+/// Tor client instance (global, wrapped in Arc<TokioMutex> for async access)
+static TOR_CLIENT: Lazy<Arc<TokioMutex<Option<TorClient<tokio::runtime::Runtime>>>>> =
+    Lazy::new(|| Arc::new(TokioMutex::new(None)));
+
+/// Tokio runtime for async operations
+static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create Tokio runtime"));
+
+/// Start Tor with default configuration
+async fn start_tor_internal() -> Result<()> {
+    let config = TorClientConfig::builder()
+        .socks_port(TOR_SOCKS_PORT) // Enable SOCKS5 proxy
+        .build()
+        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+    let client = TorClient::create_bootstrapped(config)
+        .await
+        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+    let mut guard = TOR_CLIENT.lock().await;
+    *guard = Some(client);
+    log::info!("Tor started with SOCKS5 on 127.0.0.1:{}", TOR_SOCKS_PORT);
+    Ok(())
 }
 
-fn build_sni_extension(sni: &str) -> TlsExtension {
-    let server_name = sni.as_bytes();
-    let mut ext_data = Vec::new();
-    ext_data.push(0x00);
-    ext_data.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
-    ext_data.extend_from_slice(server_name);
-    TlsExtension {
-        typ: 0x00,
-        data: ext_data,
-    }
+/// Stop Tor (drop client)
+async fn stop_tor_internal() {
+    let mut guard = TOR_CLIENT.lock().await;
+    *guard = None;
+    log::info!("Tor stopped");
 }
 
-fn rebuild_client_hello(
-    version: u16,
-    random: &[u8; 32],
-    session_id: &[u8],
-    cipher_suites: &[u16],
-    compression_methods: &[u8],
-    extensions: &[TlsExtension],
-) -> Vec<u8> {
-    let mut body = Vec::new();
-    body.extend_from_slice(&version.to_be_bytes());
-    body.extend_from_slice(random);
-    body.push(session_id.len() as u8);
-    body.extend_from_slice(session_id);
-    body.extend_from_slice(&(cipher_suites.len() as u16 * 2).to_be_bytes());
-    for cs in cipher_suites {
-        body.extend_from_slice(&cs.to_be_bytes());
-    }
-    body.push(compression_methods.len() as u8);
-    body.extend_from_slice(compression_methods);
-
-    let mut ext_bytes = Vec::new();
-    for ext in extensions {
-        ext_bytes.extend_from_slice(&ext.typ.to_be_bytes());
-        ext_bytes.extend_from_slice(&(ext.data.len() as u16).to_be_bytes());
-        ext_bytes.extend_from_slice(&ext.data);
-    }
-    body.extend_from_slice(&(ext_bytes.len() as u16).to_be_bytes());
-    body.extend_from_slice(&ext_bytes);
-
-    body
-}
-
-fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
-    let mut record = Vec::new();
-    record.push(0x16);
-    record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
-    record.push(msg_type as u8);
-    record.extend_from_slice(&(body.len() as u24).to_be_bytes());
-    record.extend_from_slice(body);
-    record
-}
-
-// ------------------------------------------------------------
-// Tor integration with rustls
-// ------------------------------------------------------------
-use arti_client::{TorClient, TorClientConfig};
-
-static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to create runtime"));
-static TOR_CLIENT: Lazy<Arc<tokio::sync::Mutex<Option<TorClient<tokio::runtime::Runtime>>>>> =
-    Lazy::new(|| Arc::new(tokio::sync::Mutex::new(None)));
-
+/// JNI entry point: start Tor
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_startTor(
-    mut _env: JNIEnv,
+    _env: JNIEnv,
     _class: JClass,
 ) -> jint {
-    let result = RUNTIME.block_on(async {
-        let config = TorClientConfig::builder()
-            .build()
-            .expect("Failed to build Tor config");
-        match TorClient::create_bootstrapped(config).await {
-            Ok(client) => {
-                let mut guard = TOR_CLIENT.lock().await;
-                *guard = Some(client);
-                log::info!("Tor started (SOCKS5 on 127.0.0.1:9150)");
-                0
-            }
-            Err(e) => {
-                log::error!("Tor start failed: {}", e);
-                1
-            }
+    match RUNTIME.block_on(start_tor_internal()) {
+        Ok(_) => 0,
+        Err(e) => {
+            log::error!("Failed to start Tor: {}", e);
+            1
         }
-    });
-    result
+    }
 }
 
-// ------------------------------------------------------------
-// JNI functions for SNI rules
-// ------------------------------------------------------------
+/// JNI entry point: stop Tor (optional)
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_iivpn_VpnService_stopTor(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    RUNTIME.block_on(stop_tor_internal());
+}
+
+// ============================================================
+//  VPN Tunnel (Placeholder – to be implemented)
+// ============================================================
+
+/// Global flag to stop VPN loop
+static VPN_RUNNING: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+
+/// Start VPN: reads from tun file descriptor, processes packets, forwards to Tor.
+/// The tun fd is passed from Android via JNI.
+pub async fn start_vpn_internal(tun_fd: i32) -> Result<()> {
+    // Convert raw fd to File for reading/writing
+    use std::os::unix::io::FromRawFd;
+    let mut tun_file = unsafe { std::fs::File::from_raw_fd(tun_fd) };
+    // Set non-blocking? We'll use blocking reads with timeout.
+    let mut buffer = [0u8; MTU];
+    let mut running = VPN_RUNNING.lock().unwrap();
+    *running = true;
+    drop(running);
+
+    log::info!("VPN thread started, reading from fd {}", tun_fd);
+
+    while *VPN_RUNNING.lock().unwrap() {
+        // Read packet from tun
+        match tun_file.read(&mut buffer) {
+            Ok(n) if n > 0 => {
+                let packet = &buffer[..n];
+                // Detect if it's a TCP packet and contains TLS ClientHello
+                // For now, we'll just forward everything to Tor's SOCKS5 proxy.
+                // This requires full IP/TCP parsing and establishing a SOCKS5 connection.
+                // Placeholder: log packet length and do nothing.
+                log::debug!("Read {} bytes from tun", n);
+                // TODO: Parse IP/TCP headers, extract payload, call modify_sni, forward via SOCKS.
+                // We'll just echo the packet back for testing.
+                tun_file.write_all(packet)?;
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                log::error!("Error reading from tun: {}", e);
+                break;
+            }
+        }
+    }
+    log::info!("VPN thread exiting");
+    Ok(())
+}
+
+/// Stop VPN (set flag)
+pub fn stop_vpn() {
+    let mut running = VPN_RUNNING.lock().unwrap();
+    *running = false;
+    log::info!("VPN stop requested");
+}
+
+/// JNI entry point: start VPN
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
+    _env: JNIEnv,
+    _class: JClass,
+) {
+    // In a real implementation, you'd get the tun fd from Kotlin via JNI.
+    // For now, just log.
+    log::info!("VPN start called – implementation pending");
+    // start_vpn_internal(fd).block_on() etc.
+}
+
+// ============================================================
+//  JNI Functions for SNI Rules
+// ============================================================
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_setSniRule(
     mut env: JNIEnv,
@@ -227,7 +447,9 @@ pub extern "system" fn Java_com_iivpn_VpnService_setSniRule(
 ) {
     let domain_str: String = env.get_string(&domain).unwrap().into();
     let repl_str: String = env.get_string(&replacement).unwrap().into();
-    set_sni_rule(&domain_str, &repl_str);
+    if let Err(e) = set_sni_rule(&domain_str, &repl_str) {
+        log::error!("Failed to set SNI rule: {}", e);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -237,30 +459,30 @@ pub extern "system" fn Java_com_iivpn_VpnService_removeSniRule(
     domain: JString,
 ) {
     let domain_str: String = env.get_string(&domain).unwrap().into();
-    remove_sni_rule(&domain_str);
+    if let Err(e) = remove_sni_rule(&domain_str) {
+        log::error!("Failed to remove SNI rule: {}", e);
+    }
 }
 
-// ------------------------------------------------------------
-// VPN placeholder (will call modify_sni on packets)
-// ------------------------------------------------------------
+/// Set the persistent storage path for SNI rules (called from Kotlin)
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
-    mut _env: JNIEnv,
+pub extern "system" fn Java_com_iivpn_VpnService_setSniRulesPath(
+    mut env: JNIEnv,
     _class: JClass,
+    path: JString,
 ) {
-    log::info!("VPN start – forwarding not yet implemented");
+    let path_str: String = env.get_string(&path).unwrap().into();
+    set_sni_rules_path(PathBuf::from(path_str));
 }
 
-// ------------------------------------------------------------
-// JNI for SNI modification (direct JNI calls, using JObject wrappers)
-// ------------------------------------------------------------
+/// JNI for modifying a packet (testing)
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     mut env: JNIEnv,
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
-    // Wrap the raw pointer in JObject and JByteArray for safe operations
+    // Wrap raw pointer as JObject, then as JByteArray
     let obj = JObject::from(packet);
     let jba = JByteArray::from(obj);
 
@@ -293,20 +515,65 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            // Convert JByteArray back to raw pointer
-            new_array.as_obj().into_inner()
+            // Return raw pointer
+            new_array.into_inner()
         }
         None => packet,
     }
 }
 
-// ------------------------------------------------------------
-// Logging
-// ------------------------------------------------------------
+// ============================================================
+//  Logging Configuration
+// ============================================================
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_initLogging(
-    mut _env: JNIEnv,
+    _env: JNIEnv,
     _class: JClass,
 ) {
+    // Initialize env_logger; on Android, logs go to logcat automatically.
     env_logger::init();
+    log::info!("II VPN Rust core initialized");
 }
+
+// ============================================================
+//  Additional Features (optional)
+// ============================================================
+
+/// Get current SNI rules as JSON string (for UI display)
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_iivpn_VpnService_getSniRulesJson(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> JString {
+    let rules = SNI_RULES.read().unwrap();
+    let json = serde_json::to_string(&*rules).unwrap_or_else(|_| "{}".to_string());
+    env.new_string(json).unwrap().into_inner()
+}
+
+/// Check if Tor is running
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_iivpn_VpnService_isTorRunning(
+    mut _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    let running = RUNTIME.block_on(async {
+        let guard = TOR_CLIENT.lock().await;
+        guard.is_some()
+    });
+    if running { JNI_TRUE } else { JNI_FALSE }
+}
+
+/// Get version string
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_iivpn_VpnService_getVersion(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> JString {
+    let version = format!("{}.{}.{}", env!("CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MINOR"), env!("CARGO_PKG_VERSION_PATCH"));
+    env.new_string(version).unwrap().into_inner()
+}
+
+// ============================================================
+//  End of Library
+// ============================================================
