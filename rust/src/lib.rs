@@ -510,7 +510,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
                 return packet;
             }
             // Return raw pointer
-            new_array.into_inner()
+            new_array
         }
         None => packet,
     }
@@ -541,7 +541,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_getSniRulesJson(
 ) -> JString {
     let rules = SNI_RULES.read().unwrap();
     let json = serde_json::to_string(&*rules).unwrap_or_else(|_| "{}".to_string());
-    env.new_string(json).unwrap().into_inner()
+    env.new_string(json).unwrap()
 }
 
 /// Check if Tor is running
@@ -564,7 +564,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_getVersion(
     _class: JClass,
 ) -> JString {
     let version = format!("{}.{}.{}", env!("CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MINOR"), env!("CARGO_PKG_VERSION_PATCH"));
-    env.new_string(version).unwrap().into_inner()
+    env.new_string(version).unwrap()
 }
 
 // ============================================================
