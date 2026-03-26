@@ -24,6 +24,8 @@ use tls_parser::types::U24;
 
 // Tor – use the preferred runtime from arti_client
 use arti_client::{TorClient, TorClientConfig, PreferredRuntime};
+use arti_client::config::TorClientConfigBuilder;
+use arti_client::Error as TorError;
 
 // Serialization
 use serde_json;
@@ -251,10 +253,10 @@ async fn start_tor_internal() -> Result<()> {
     let config = TorClientConfig::builder()
         .socks_port(TOR_SOCKS_PORT)
         .build()
-        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e: arti_client::config::Error| IIVpnError::Tor(e.to_string()))?;
     let client = TorClient::create_bootstrapped(config)
         .await
-        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e: TorError| IIVpnError::Tor(e.to_string()))?;
     *TOR_CLIENT.lock().await = Some(client);
     log::info!("Tor started on port {}", TOR_SOCKS_PORT);
     Ok(())
@@ -307,7 +309,6 @@ pub extern "system" fn Java_com_iivpn_VpnService_setSniRulesPath(
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     mut env: JNIEnv, _class: JClass, packet: jbyteArray,
 ) -> jbyteArray {
-    // Convert raw pointer to JByteArray via unsafe JObject::from_raw
     let jba = unsafe { JByteArray::from(JObject::from_raw(packet)) };
     let len = match env.get_array_length(&jba) {
         Ok(l) => l as usize,
@@ -345,7 +346,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_getSniRulesJson<'a>(
-    mut env: JNIEnv<'a>, _class: JClass<'a>,
+    env: JNIEnv<'a>, _class: JClass<'a>,
 ) -> JString<'a> {
     let rules = SNI_RULES.read().unwrap();
     let json = serde_json::to_string(&*rules).unwrap_or_else(|_| "{}".to_string());
@@ -356,13 +357,16 @@ pub extern "system" fn Java_com_iivpn_VpnService_getSniRulesJson<'a>(
 pub extern "system" fn Java_com_iivpn_VpnService_isTorRunning(
     _env: JNIEnv, _class: JClass,
 ) -> jboolean {
-    let running = RUNTIME.block_on(async { TOR_CLIENT.lock().await.is_some() });
+    let running = RUNTIME.block_on(async {
+        let guard: tokio::sync::MutexGuard<'_, Option<TorClient<PreferredRuntime>>> = TOR_CLIENT.lock().await;
+        guard.is_some()
+    });
     if running { JNI_TRUE } else { JNI_FALSE }
 }
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_getVersion<'a>(
-    mut env: JNIEnv<'a>, _class: JClass<'a>,
+    env: JNIEnv<'a>, _class: JClass<'a>,
 ) -> JString<'a> {
     let version = format!("{}.{}.{}", env!("CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MINOR"), env!("CARGO_PKG_VERSION_PATCH"));
     env.new_string(version).unwrap()
