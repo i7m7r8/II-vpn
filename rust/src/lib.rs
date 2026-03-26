@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::path::PathBuf;
 use std::fs;
 use std::io::{self, Write, Read};
-use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
@@ -28,14 +27,14 @@ use thiserror::Error;
 use tls_parser::handshake::extensions::TlsExtension;
 use tls_parser::handshake::*;
 use tls_parser::record::TLSMessage;
-use tls_parser::{parse_tls_plaintext, TlsParserSettings};
+use tls_parser::{parse_tls_plaintext};
 use tls_parser::types::U24;
 
 // Tor
-use arti_client::{TorClient, TorClientConfig, TorAddr};
+use arti_client::{TorClient, TorClientConfig};
 use arti_client::config::BoolOrAuto;
 
-// For VPN packet parsing
+// For VPN packet parsing (future use)
 use pnet::packet::ip::IpNextHeaderProtocol;
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::tcp::TcpPacket;
@@ -379,10 +378,8 @@ static VPN_RUNNING: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
 /// Start VPN: reads from tun file descriptor, processes packets, forwards to Tor.
 /// The tun fd is passed from Android via JNI.
 pub async fn start_vpn_internal(tun_fd: i32) -> Result<()> {
-    // Convert raw fd to File for reading/writing
     use std::os::unix::io::FromRawFd;
     let mut tun_file = unsafe { std::fs::File::from_raw_fd(tun_fd) };
-    // Set non-blocking? We'll use blocking reads with timeout.
     let mut buffer = [0u8; MTU];
     let mut running = VPN_RUNNING.lock().unwrap();
     *running = true;
@@ -391,17 +388,10 @@ pub async fn start_vpn_internal(tun_fd: i32) -> Result<()> {
     log::info!("VPN thread started, reading from fd {}", tun_fd);
 
     while *VPN_RUNNING.lock().unwrap() {
-        // Read packet from tun
         match tun_file.read(&mut buffer) {
             Ok(n) if n > 0 => {
                 let packet = &buffer[..n];
-                // Detect if it's a TCP packet and contains TLS ClientHello
-                // For now, we'll just forward everything to Tor's SOCKS5 proxy.
-                // This requires full IP/TCP parsing and establishing a SOCKS5 connection.
-                // Placeholder: log packet length and do nothing.
-                log::debug!("Read {} bytes from tun", n);
-                // TODO: Parse IP/TCP headers, extract payload, call modify_sni, forward via SOCKS.
-                // We'll just echo the packet back for testing.
+                // For now, just echo back (placeholder)
                 tun_file.write_all(packet)?;
             }
             Ok(_) => continue,
@@ -428,15 +418,20 @@ pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    // In a real implementation, you'd get the tun fd from Kotlin via JNI.
-    // For now, just log.
     log::info!("VPN start called – implementation pending");
-    // start_vpn_internal(fd).block_on() etc.
+    // In production, you would receive the tun fd from Kotlin and call start_vpn_internal.
 }
 
 // ============================================================
 //  JNI Functions for SNI Rules
 // ============================================================
+
+/// Convert a jbyteArray to a JByteArray safely
+fn jbytearray_to_jbytearray<'a>(env: &JNIEnv<'a>, arr: jbyteArray) -> JByteArray<'a> {
+    // JByteArray is a JObject; we can create it via JObject::from and then cast.
+    // The safe way is to use JObject::from(arr as jobject) and then into JByteArray.
+    JByteArray::from(JObject::from(arr as jni::sys::jobject))
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_setSniRule(
@@ -482,9 +477,8 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
-    // Wrap raw pointer as JObject, then as JByteArray
-    let obj = JObject::from(packet);
-    let jba = JByteArray::from(obj);
+    // Convert raw pointer to JByteArray
+    let jba = jbytearray_to_jbytearray(&env, packet);
 
     // Get length
     let len = match env.get_array_length(&jba) {
@@ -531,13 +525,12 @@ pub extern "system" fn Java_com_iivpn_VpnService_initLogging(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    // Initialize env_logger; on Android, logs go to logcat automatically.
     env_logger::init();
     log::info!("II VPN Rust core initialized");
 }
 
 // ============================================================
-//  Additional Features (optional)
+//  Additional Features
 // ============================================================
 
 /// Get current SNI rules as JSON string (for UI display)
