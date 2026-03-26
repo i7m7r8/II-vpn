@@ -253,10 +253,10 @@ async fn start_tor_internal() -> Result<()> {
     let config = builder
         .socks_port(TOR_SOCKS_PORT)
         .build()
-        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e: arti_client::Error| IIVpnError::Tor(e.to_string()))?;
     let client = TorClient::create_bootstrapped(config)
         .await
-        .map_err(|e| IIVpnError::Tor(e.to_string()))?;
+        .map_err(|e: arti_client::Error| IIVpnError::Tor(e.to_string()))?;
     *TOR_CLIENT.lock().await = Some(client);
     log::info!("Tor started on port {}", TOR_SOCKS_PORT);
     Ok(())
@@ -334,7 +334,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(&new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            new_array.into_inner()
+            new_array.as_obj().into_inner()
         }
         None => packet,
     }
