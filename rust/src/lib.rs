@@ -24,7 +24,6 @@ use tls_parser::types::U24;
 
 // Tor – use the config builder to enable SOCKS
 use arti_client::{TorClient, TorClientConfig};
-use arti_client::config::TorClientConfigBuilder;
 
 // Serialization
 use serde_json;
@@ -251,7 +250,6 @@ static RUNTIME: Lazy<Runtime> = Lazy::new(|| Runtime::new().expect("Failed to cr
 async fn start_tor_internal() -> Result<()> {
     let builder = TorClientConfig::builder();
     let config = builder
-        .socks_port(TOR_SOCKS_PORT)
         .build()
         .map_err(|e: arti_client::Error| IIVpnError::Tor(e.to_string()))?;
     let client = TorClient::create_bootstrapped(config)
@@ -334,7 +332,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
             if env.set_byte_array_region(&new_array, 0, new_data_i8).is_err() {
                 return packet;
             }
-            new_array.as_obj().into_inner()
+            new_array.into_inner()
         }
         None => packet,
     }
