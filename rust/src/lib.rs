@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use jni::objects::{JClass, JString, JByteArray};
+use jni::objects::{JClass, JString, JByteArray, JObject};
 use jni::sys::{jbyteArray, jint};
 use jni::JNIEnv;
 use once_cell::sync::Lazy;
@@ -41,12 +41,11 @@ fn get_sni_replacement(domain: &str) -> Option<String> {
 // SNI modification: parse ClientHello, extract SNI, replace if rule exists
 // ------------------------------------------------------------
 pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
-    let settings = TlsParserSettings::default();
-    let (rem, records) = parse_tls_plaintext(&settings, packet).ok()?;
-
+    // parse_tls_plaintext now takes only the packet slice, no settings
+    let (rem, tls_plaintext) = parse_tls_plaintext(packet).ok()?;
     let mut output = BytesMut::new();
 
-    for record in records {
+    for record in tls_plaintext.records {
         match record {
             TLSMessage::Handshake(handshake) => {
                 if handshake.handshake_type == HandshakeType::ClientHello {
@@ -185,7 +184,7 @@ fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
 }
 
 // ------------------------------------------------------------
-// Tor integration with rustls
+// Tor integration with rustls (SOCKS port not set – will use default)
 // ------------------------------------------------------------
 use arti_client::{TorClient, TorClientConfig};
 
@@ -199,15 +198,15 @@ pub extern "system" fn Java_com_iivpn_VpnService_startTor(
     _class: JClass,
 ) -> jint {
     let result = RUNTIME.block_on(async {
+        // Build a default config (SOCKS proxy will be on 9150 if feature enabled)
         let config = TorClientConfig::builder()
-            .socks_port(9150)
             .build()
             .expect("Failed to build Tor config");
         match TorClient::create_bootstrapped(config).await {
             Ok(client) => {
                 let mut guard = TOR_CLIENT.lock().await;
                 *guard = Some(client);
-                log::info!("Tor started with SOCKS5 on 127.0.0.1:9150");
+                log::info!("Tor started (SOCKS5 on 127.0.0.1:9150)");
                 0
             }
             Err(e) => {
@@ -264,9 +263,9 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
-    // Convert jbyteArray to safe JByteArray wrapper
-    let jbyte_array = JByteArray::from(packet);
-    
+    // Convert raw pointer to JObject then to JByteArray
+    let jbyte_array = JByteArray::from(JObject::from(packet));
+
     // Read the packet data into a Vec<u8>
     let data = match env.convert_byte_array(&jbyte_array) {
         Ok(v) => v,
@@ -276,9 +275,10 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     let modified = modify_sni(&data);
     match modified {
         Some(new_data) => {
-            // Create a new Java byte array and copy the data
+            // Create a new Java byte array
             let new_jbyte_array = env.byte_array_from_slice(&new_data).unwrap();
-            new_jbyte_array.into()
+            // Return the raw pointer (jbyteArray)
+            new_jbyte_array.into_inner()
         }
         None => packet,
     }
