@@ -194,7 +194,7 @@ static TOR_CLIENT: Lazy<Arc<tokio::sync::Mutex<Option<TorClient<tokio::runtime::
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_startTor(
-    _env: JNIEnv,
+    mut _env: JNIEnv,
     _class: JClass,
 ) -> jint {
     let result = RUNTIME.block_on(async {
@@ -223,7 +223,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_startTor(
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_setSniRule(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     domain: JString,
     replacement: JString,
@@ -235,7 +235,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_setSniRule(
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_removeSniRule(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     domain: JString,
 ) {
@@ -248,7 +248,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_removeSniRule(
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
-    _env: JNIEnv,
+    mut _env: JNIEnv,
     _class: JClass,
 ) {
     log::info!("VPN start – forwarding not yet implemented");
@@ -259,7 +259,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
-    env: JNIEnv,
+    mut env: JNIEnv,
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
@@ -283,7 +283,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_initLogging(
-    _env: JNIEnv,
+    mut _env: JNIEnv,
     _class: JClass,
 ) {
     env_logger::init();
