@@ -8,7 +8,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # SNI extraction and replacement
-sni = "0.2"
 
 # Tor client
 arti-client = { version = "0.40", default-features = false, features = ["tokio", "rustls", "pt-client"] }
