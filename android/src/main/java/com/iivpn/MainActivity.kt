@@ -12,7 +12,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.VpnKey
-import androidx.compose.material.icons.filled.Shield
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import com.iivpn.ui.theme.IIVPNTheme
 
 class MainActivity : ComponentActivity() {
@@ -24,20 +26,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    VPNControlScreen(
-                        onStartVpn = {
-                            val intent = Intent(this, VpnService::class.java)
-                            startService(intent)
-                        },
-                        onStopVpn = {
-                            val intent = Intent(this, VpnService::class.java)
-                            stopService(intent)
-                        },
-                        onStartTor = {
-                            // Call JNI to start Tor
-                            VpnService.startTor()
-                        }
-                    )
+                    VPNControlScreen()
                 }
             }
         }
@@ -45,13 +34,19 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun VPNControlScreen(
-    onStartVpn: () -> Unit,
-    onStopVpn: () -> Unit,
-    onStartTor: () -> Unit
-) {
-    var isVpnRunning by remember { mutableStateOf(false) }
+fun VPNControlScreen() {
     var isTorRunning by remember { mutableStateOf(false) }
+    var isVpnRunning by remember { mutableStateOf(false) }
+    var sniRules by remember { mutableStateOf(mapOf<String, String>()) }
+
+    LaunchedEffect(Unit) {
+        VpnService.initLogging()
+        // Optionally load existing rules
+        val json = VpnService.getSniRulesJson()
+        // Parse JSON (simplified – you'd use a JSON library)
+        // For brevity, we'll just print
+        android.util.Log.d("IIVPN", "Rules JSON: $json")
+    }
 
     Column(
         modifier = Modifier
@@ -66,19 +61,20 @@ fun VPNControlScreen(
             modifier = Modifier.size(80.dp),
             tint = MaterialTheme.colorScheme.primary
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(24.dp))
         Text(
             text = "II VPN",
-            style = MaterialTheme.typography.headlineLarge,
+            fontSize = 32.sp,
+            fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = "Tor + SNI Protection",
-            style = MaterialTheme.typography.bodyLarge,
+            fontSize = 16.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(48.dp))
 
         // Tor status and button
         Card(
@@ -89,32 +85,27 @@ fun VPNControlScreen(
                 modifier = Modifier.padding(16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Shield,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp)
+                Text("Tor Status:", fontWeight = FontWeight.Medium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Surface(
+                    color = if (isTorRunning) Color.Green else Color.Red,
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Text(
+                        text = if (isTorRunning) "ACTIVE" else "INACTIVE",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Tor Status:")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Surface(
-                        color = if (isTorRunning) Color.Green else Color.Red,
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Text(
-                            text = if (isTorRunning) "ACTIVE" else "INACTIVE",
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                            fontSize = 12.sp,
-                            color = Color.White
-                        )
-                    }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        onStartTor()
-                        isTorRunning = true
+                        val result = VpnService.startTor()
+                        if (result == 0) {
+                            isTorRunning = true
+                        }
                     },
                     enabled = !isTorRunning,
                     modifier = Modifier.fillMaxWidth()
@@ -152,7 +143,7 @@ fun VPNControlScreen(
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        onStartVpn()
+                        VpnService.startVpn()
                         isVpnRunning = true
                     },
                     enabled = isTorRunning,
@@ -163,7 +154,7 @@ fun VPNControlScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(
                     onClick = {
-                        onStopVpn()
+                        // Implement stop later
                         isVpnRunning = false
                     },
                     enabled = isVpnRunning,
@@ -176,5 +167,14 @@ fun VPNControlScreen(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // SNI rules management (placeholder)
+        Text(
+            text = "SNI Rules: ${sniRules.size} rules",
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
     }
 }

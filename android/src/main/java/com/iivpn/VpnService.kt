@@ -6,7 +6,7 @@ import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 
-class VpnService : VpnService() {
+class VpnService : android.net.VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
 
     companion object {
@@ -15,16 +15,27 @@ class VpnService : VpnService() {
         }
 
         external fun startTor(): Int
+        external fun isTorRunning(): Boolean
+        external fun setSniRule(domain: String, replacement: String)
+        external fun removeSniRule(domain: String)
+        external fun setSniRulesPath(path: String)
+        external fun getSniRulesJson(): String
+        external fun modifySni(packet: ByteArray): ByteArray
         external fun startVpn()
-        external fun modifySni(packet: ByteArray, newSni: String): ByteArray
         external fun initLogging()
+        external fun getVersion(): String
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         initLogging()
-        // Start Tor if not already running (check via JNI)
-        val torResult = startTor()
-        Log.i("IIVPN", "Tor start result: $torResult")
+        // Set storage path for SNI rules
+        val filesDir = applicationContext.filesDir.absolutePath
+        setSniRulesPath("$filesDir/sni_rules.json")
+
+        // Start Tor if not already running
+        if (!isTorRunning()) {
+            startTor()
+        }
 
         if (vpnInterface == null) {
             startVpn()
@@ -42,7 +53,9 @@ class VpnService : VpnService() {
 
         vpnInterface = builder.establish() ?: return
 
-        // Call Rust to start VPN processing
+        // Start VPN thread that will call the Rust startVpn function
+        // In a real implementation, we'd pass the fd to Rust.
+        // For now, we'll just call the placeholder.
         startVpn()
     }
 
