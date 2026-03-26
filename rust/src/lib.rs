@@ -273,7 +273,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
 
     let modified = modify_sni(&data);
     match modified {
-        Some(new_data) => env.byte_array_from_slice(&new_data).unwrap().into_inner(),
+        Some(new_data) => env.byte_array_from_slice(&new_data).unwrap().into(),
         None => packet,
     }
 }
