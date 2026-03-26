@@ -1,7 +1,7 @@
 use bytes::BytesMut;
-use jni::objects::{JClass, JString, JByteArray, JObject};
-use jni::sys::{jbyteArray, jint};
+use jni::sys::{jbyteArray, jint, jsize};
 use jni::JNIEnv;
+use jni::objects::{JClass, JString};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,6 @@ fn get_sni_replacement(domain: &str) -> Option<String> {
 // SNI modification: parse ClientHello, extract SNI, replace if rule exists
 // ------------------------------------------------------------
 pub fn modify_sni(packet: &[u8]) -> Option<Vec<u8>> {
-    // parse_tls_plaintext now takes only the packet slice, no settings
     let (rem, tls_plaintext) = parse_tls_plaintext(packet).ok()?;
     let mut output = BytesMut::new();
 
@@ -184,7 +183,7 @@ fn build_handshake_record(msg_type: HandshakeType, body: &[u8]) -> Vec<u8> {
 }
 
 // ------------------------------------------------------------
-// Tor integration with rustls (SOCKS port not set – will use default)
+// Tor integration with rustls
 // ------------------------------------------------------------
 use arti_client::{TorClient, TorClientConfig};
 
@@ -198,7 +197,6 @@ pub extern "system" fn Java_com_iivpn_VpnService_startTor(
     _class: JClass,
 ) -> jint {
     let result = RUNTIME.block_on(async {
-        // Build a default config (SOCKS proxy will be on 9150 if feature enabled)
         let config = TorClientConfig::builder()
             .build()
             .expect("Failed to build Tor config");
@@ -255,7 +253,7 @@ pub extern "system" fn Java_com_iivpn_VpnService_startVpn(
 }
 
 // ------------------------------------------------------------
-// JNI for SNI modification (for testing) – safe conversion using JByteArray
+// JNI for SNI modification (safe direct JNI calls)
 // ------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
@@ -263,22 +261,38 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
     _class: JClass,
     packet: jbyteArray,
 ) -> jbyteArray {
-    // Convert raw pointer to JObject then to JByteArray
-    let jbyte_array = JByteArray::from(JObject::from(packet));
-
-    // Read the packet data into a Vec<u8>
-    let data = match env.convert_byte_array(&jbyte_array) {
-        Ok(v) => v,
-        Err(_) => return packet, // return original on error
+    // Get length
+    let len = match env.get_array_length(packet) {
+        Ok(l) => l as usize,
+        Err(_) => return packet,
     };
+
+    // Read packet data into Vec<u8>
+    let mut data = vec![0u8; len];
+    // Convert to i8 slice for JNI
+    let data_i8: &mut [i8] = unsafe {
+        std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut i8, len)
+    };
+    if env.get_byte_array_region(packet, 0, data_i8).is_err() {
+        return packet;
+    }
 
     let modified = modify_sni(&data);
     match modified {
         Some(new_data) => {
-            // Create a new Java byte array
-            let new_jbyte_array = env.byte_array_from_slice(&new_data).unwrap();
-            // Return the raw pointer (jbyteArray)
-            new_jbyte_array.into_inner()
+            // Create new byte array
+            let new_array = match env.new_byte_array(new_data.len() as jint) {
+                Ok(arr) => arr,
+                Err(_) => return packet,
+            };
+            let new_data_i8: &[i8] = unsafe {
+                std::slice::from_raw_parts(new_data.as_ptr() as *const i8, new_data.len())
+            };
+            if env.set_byte_array_region(new_array, 0, new_data_i8).is_err() {
+                return packet;
+            }
+            // Return the raw pointer
+            new_array.into_inner()
         }
         None => packet,
     }
