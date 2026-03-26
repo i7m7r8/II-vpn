@@ -4,10 +4,31 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["cdylib"]   # Shared library for Android
+crate-type = ["cdylib"]
 
 [dependencies]
+# Tor
+arti-client = "1.2"
+arti-socks5 = "0.1"
+tokio = { version = "1", features = ["full"] }
+once_cell = "1.19"
+
+# SNI parsing
 tls-parser = "0.12"
 bytes = "1"
-log = "0.4"
+
+# VPN and packet handling
+smoltcp = { version = "0.10", features = ["proto-ipv4", "proto-ipv6", "socket-tcp", "medium-ip"] }
+pnet = "0.35"   # for IP/TCP headers
+etherparse = "0.13" # alternative for packet parsing
+
+# JNI
 jni = "0.21"
+log = "0.4"
+env_logger = "0.10"
+
+# Async
+futures = "0.3"
+
+# Misc
+thiserror = "1"
