@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use jni::objects::{JClass, JString};
-use jni::sys::{jbyteArray, jint};
 use jni::JNIEnv;
+use jni::sys::{jbyteArray, jint};
 use tls_parser::handshake::*;
 use tls_parser::types::U24;
 use tls_parser::record::TLSMessage;
@@ -161,7 +161,12 @@ pub extern "system" fn Java_com_iivpn_VpnService_modifySni(
 
     // Convert back to Java byte array
     match modified {
-        Some(data) => env.byte_array_from_slice(&data).unwrap().into_inner(),
+    Some(data) => {
+        let len = data.len() as jint;
+        let arr = env.new_byte_array(len).unwrap();
+        env.set_byte_array_region(arr, 0, &data).unwrap();
+        arr.into_inner()
+    },
         None => packet, // return original if modification fails
     }
 }
