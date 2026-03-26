@@ -97,7 +97,7 @@ pub fn replace_sni(packet: &[u8], new_sni: &str) -> Option<Vec<u8>> {
     let body_start = pos;
 
     // Version
-    let version = u16::from_be_bytes([packet[pos], packet[pos+1]]);
+    let _version = u16::from_be_bytes([packet[pos], packet[pos+1]]);
     output.extend_from_slice(&packet[pos..pos+2]);
     pos += 2;
     // Random
@@ -133,7 +133,7 @@ pub fn replace_sni(packet: &[u8], new_sni: &str) -> Option<Vec<u8>> {
         ext_pos += 2;
         let ext_data_len = u16::from_be_bytes([packet[ext_pos], packet[ext_pos+1]]) as usize;
         ext_pos += 2;
-        let ext_data_start = ext_pos;
+        let _ext_data_start = ext_pos;
         let ext_data_end = ext_pos + ext_data_len;
         if ext_data_end > ext_end { break; }
 
